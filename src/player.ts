@@ -187,6 +187,10 @@ export function toggle() {
 
 export const pause = () => audio.pause()
 
+export function seekTo(sec: number) {
+  if (audio.duration) audio.currentTime = Math.max(0, Math.min(audio.duration - 0.5, sec))
+}
+
 export function seekBy(sec: number) {
   if (!audio.duration) return
   audio.currentTime = Math.max(0, Math.min(audio.duration - 1, audio.currentTime + sec))

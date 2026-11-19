@@ -1,6 +1,6 @@
 // Tiny observable store + what the TV remembers (localStorage): settings, play history, likes.
 import { useEffect, useState } from 'preact/hooks'
-import type { Track } from './sources/types'
+import type { Item, Track } from './sources/types'
 
 export interface Store<T> {
   get(): T
@@ -52,9 +52,26 @@ export interface Settings {
   autoplay: boolean
   /** Lyrics open with Now Playing. */
   showLyrics: boolean
+  /** BitChord TV's three palettes. */
+  theme: Theme
 }
 
-export const settings = createStore<Settings>({ preferSaavn: true, preferOpus: false, autoplay: true, showLyrics: true }, 'bc.settings')
+export type Theme = 'dynamic' | 'oled' | 'midnight'
+
+export const settings = createStore<Settings>({ preferSaavn: true, preferOpus: false, autoplay: true, showLyrics: true, theme: 'dynamic' }, 'bc.settings')
+
+/** Albums and playlists saved to the Library on this TV. */
+export const saved = createStore<Item[]>([], 'bc.saved')
+export const recentSearches = createStore<string[]>([], 'bc.recent')
+
+export function toggleSaved(item: Item) {
+  saved.set((s) => (s.some((x) => x.id === item.id) ? s.filter((x) => x.id !== item.id) : [item, ...s].slice(0, 100)))
+}
+
+export function addRecentSearch(q: string) {
+  const v = q.trim()
+  if (v) recentSearches.set((r) => [v, ...r.filter((x) => x.toLowerCase() !== v.toLowerCase())].slice(0, 12))
+}
 
 export interface Play {
   t: Track

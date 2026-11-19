@@ -205,8 +205,58 @@ export function shelvesOf(root: Raw): Shelf[] {
     const items = (s.contents || []).map(itemOf).filter(nonNull)
     if (items.length) out.push({ title: text(s.title), items })
   }
+  for (const g of find(root, 'gridRenderer')) {
+    const items = (g.items || []).map(itemOf).filter(nonNull)
+    const h = g.header && g.header.gridHeaderRenderer
+    if (items.length) out.push({ title: h ? text(h.title) : '', items })
+  }
   return out
 }
+
+// ---- Explore, moods & genres --------------------------------------------------------------
+
+export interface Mood {
+  title: string
+  /** The sleeve's stripe colour, as YouTube Music paints it. */
+  color: string
+  browseId: string
+  params: string
+}
+
+const argb = (n: number) => {
+  const u = n >>> 0
+  return `rgb(${(u >>> 16) & 255}, ${(u >>> 8) & 255}, ${u & 255})`
+}
+
+function moodOf(b: Raw): Mood | null {
+  const ep = b.clickCommand && b.clickCommand.browseEndpoint
+  if (!ep) return null
+  return { title: text(b.buttonText), color: argb((b.solid && b.solid.leftStripeColor) || 0xff444444), browseId: ep.browseId, params: ep.params || '' }
+}
+
+export function parseMoodGroups(j: Raw): { title: string; items: Mood[] }[] {
+  return find(j, 'gridRenderer')
+    .map((g) => ({
+      title: text(g.header && g.header.gridHeaderRenderer && g.header.gridHeaderRenderer.title),
+      items: (g.items || []).map((i: Raw) => i.musicNavigationButtonRenderer && moodOf(i.musicNavigationButtonRenderer)).filter(Boolean) as Mood[],
+    }))
+    .filter((g) => g.items.length)
+}
+
+export function parseExplore(j: Raw): { shelves: Shelf[]; moods: Mood[] } {
+  return {
+    shelves: shelvesOf(j.contents).filter((s) => !/episode|podcast/i.test(s.title)),
+    // Only the mood sleeves; the page's top buttons (New releases, Charts) are other pages.
+    moods: find(j, 'musicNavigationButtonRenderer')
+      .map(moodOf)
+      .filter((m): m is Mood => !!m && m.browseId === 'FEmusic_moods_and_genres_category'),
+  }
+}
+
+export const explore = async () => parseExplore(await music('browse', { browseId: 'FEmusic_explore' }))
+export const moodGroups = async () => parseMoodGroups(await music('browse', { browseId: 'FEmusic_moods_and_genres' }))
+/** A mood or genre page: its playlists, as shelves. */
+export const browseShelves = async (browseId: string, params: string) => shelvesOf((await music('browse', { browseId, params })).contents)
 
 // ---- Endpoints -------------------------------------------------------------------
 

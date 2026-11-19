@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { art, parseArtist, parseCollection, parseRadio, parseSearch, pickFormat, shelvesOf, toSeconds } from './ytm'
+import { art, parseArtist, parseCollection, parseExplore, parseMoodGroups, parseRadio, parseSearch, pickFormat, shelvesOf, toSeconds } from './ytm'
 
 const fx = (name: string) => JSON.parse(readFileSync(`fixtures/${name}.json`, 'utf8'))
 
@@ -52,6 +52,17 @@ describe('YouTube Music parsers (captured responses)', () => {
     expect(a.topSongs.length).toBeGreaterThan(0)
     expect(a.shelves.map((s) => s.title)).toContain('Albums')
     expect(a.image).toMatch(/^https:/)
+  })
+
+  it('reads Explore with its moods, and the moods page', () => {
+    const e = parseExplore(fx('explore'))
+    expect(e.shelves.map((s) => s.title)).toContain('New albums & singles')
+    expect(e.shelves.some((s) => /episode/i.test(s.title))).toBe(false)
+    expect(e.moods.length).toBeGreaterThan(10)
+    expect(e.moods[0]).toMatchObject({ title: 'Chill', browseId: 'FEmusic_moods_and_genres_category', color: expect.stringMatching(/^rgb\(/) })
+    const groups = parseMoodGroups(fx('moods'))
+    expect(groups.map((g) => g.title)).toEqual(['Moods & moments', 'Genres'])
+    expect(shelvesOf(fx('mood').contents).length).toBeGreaterThan(3)
   })
 
   it('reads a radio queue', () => {

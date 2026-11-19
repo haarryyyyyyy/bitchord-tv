@@ -1,5 +1,10 @@
 // Synced lyrics from LRCLIB (BitChord's first provider), with a plain-text fallback.
+// A result is used only when BitChord's TrackMatcher says it is the same recording:
+// same title (takes such as "Lofi Flip" or "Remix" must agree), a shared artist, and
+// a length within 4 seconds. Taking LRCLIB's first search hit is what showed another
+// song's lyrics before.
 import { getJson, qs } from './lib/net'
+import { ranked, withinSeconds, type MatchCandidate } from './sources/match'
 import type { Track } from './sources/types'
 
 export interface Line {
@@ -45,16 +50,30 @@ export function lineAt(lines: Line[], time: number): number {
   return ans
 }
 
-const clean = (s: string) => s.replace(/\s*[([].*?[)\]]/g, '').replace(/\s+-\s+.*$/, '').trim()
-
-interface LrcRow {
-  syncedLyrics?: string | null
-  plainLyrics?: string | null
+export interface LrcRow {
+  trackName?: string
+  artistName?: string
+  albumName?: string
   duration?: number
   instrumental?: boolean
+  syncedLyrics?: string | null
+  plainLyrics?: string | null
 }
 
-function toLyrics(r: LrcRow | null | undefined): Lyrics | null {
+const DRIFT_SEC = 4
+
+/** The LRCLIB row that is this recording, synced lyrics preferred, or null. */
+export function pickLyricsRow(rows: LrcRow[], t: { title: string; artist: string; durationSec: number }): LrcRow | null {
+  const target = { title: t.title, artist: t.artist, durationSec: t.durationSec || null }
+  const cands = rows
+    .filter((r) => !r.instrumental && (r.syncedLyrics || r.plainLyrics))
+    .map((r) => ({ title: r.trackName || '', artist: r.artistName || '', durationSec: r.duration || null, album: r.albumName || null, row: r }) as MatchCandidate & { row: LrcRow })
+  // Without a known length a title-and-artist match is all there is to go on.
+  const same = ranked(cands, target).filter((c) => !target.durationSec || withinSeconds(c, target, DRIFT_SEC))
+  return (same.filter((c) => c.row.syncedLyrics)[0] || same[0] || { row: null }).row
+}
+
+function toLyrics(r: LrcRow | null): Lyrics | null {
   if (!r) return null
   if (r.syncedLyrics) {
     const lines = parseLrc(r.syncedLyrics)
@@ -64,25 +83,27 @@ function toLyrics(r: LrcRow | null | undefined): Lyrics | null {
   return null
 }
 
+const clean = (s: string) => s.replace(/\s*[([].*?[)\]]/g, '').replace(/\s+-\s+.*$/, '').trim()
 const cache = new Map<string, Lyrics | null>()
 
-export async function fetchLyrics(t: Track): Promise<Lyrics | null> {
+/** [durationSec] should be the player's real length when the catalogue didn't give one. */
+export async function fetchLyrics(t: Track, durationSec: number): Promise<Lyrics | null> {
   if (cache.has(t.id)) return cache.get(t.id)!
-  const artist = (t.artists && t.artists[0] && t.artists[0].name) || t.artist.split(/,|&/)[0].trim()
-  const title = clean(t.title)
-  let found: Lyrics | null = null
+  const target = { title: t.title, artist: t.artist, durationSec: Math.round(durationSec || t.durationSec || 0) }
+  const lead = ((t.artists && t.artists[0] && t.artists[0].name) || t.artist.split(/,|&/)[0]).trim()
+  let rows: LrcRow[] = []
   try {
-    const params: Record<string, string | number> = { track_name: title, artist_name: artist }
-    if (t.durationSec) params.duration = t.durationSec
-    found = toLyrics(await getJson<LrcRow>('https://lrclib.net/api/get?' + qs(params), 7000))
+    // LRCLIB's exact lookup first: it already matches title, artist and length (±2 s).
+    if (target.durationSec) {
+      const exact = await getJson<LrcRow>('https://lrclib.net/api/get?' + qs({ track_name: clean(t.title), artist_name: lead, duration: target.durationSec }), 7000).catch(() => null)
+      if (exact) rows.push(exact)
+    }
+    if (!pickLyricsRow(rows, target)) {
+      rows = rows.concat(await getJson<LrcRow[]>('https://lrclib.net/api/search?' + qs({ track_name: clean(t.title), artist_name: lead }), 7000).catch(() => []))
+    }
+    if (!pickLyricsRow(rows, target)) rows = rows.concat(await getJson<LrcRow[]>('https://lrclib.net/api/search?' + qs({ q: clean(t.title) + ' ' + lead }), 7000).catch(() => []))
   } catch {}
-  if (!found) {
-    try {
-      const rows = await getJson<LrcRow[]>('https://lrclib.net/api/search?' + qs({ q: `${title} ${artist}` }), 7000)
-      const near = rows.filter((r) => !t.durationSec || !r.duration || Math.abs(r.duration - t.durationSec) <= 4)
-      found = toLyrics(near.filter((r) => r.syncedLyrics)[0] || near[0])
-    } catch {}
-  }
+  const found = toLyrics(pickLyricsRow(rows, target))
   cache.set(t.id, found)
   return found
 }

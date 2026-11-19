@@ -5,6 +5,25 @@ It is built for the remote: D-pad navigation, media keys, and a 1920×1080 layou
 
 Not affiliated with Google, YouTube, JioSaavn or Samsung. It streams from their public endpoints, so it can stop working when they change them.
 
+The interface follows BitChord's own Android TV module (`tv/`, Compose for TV), which is Apple Music on tvOS. That means a tab bar at the top, cards that lift when focused, white "platter" buttons, a canvas tinted by the artwork, and a Now Playing screen whose controls hide when idle.
+
+## Using the remote
+
+| Where | Key | Does |
+| --- | --- | --- |
+| Anywhere | ▲ from a page's top row | Goes to the tab bar (Home, Explore, Library, Now Playing, Search, Settings) |
+| Tab bar | ◀ ▶ | Home, Explore and Library switch as soon as they're focused |
+| Tab bar | ▼ | Enters the page at its top |
+| Any song | Hold OK | Song menu: Play Next, Add to Queue, Start Radio, Favourite, Go to Album/Artist |
+| Search | OK on keys | Types; results update as you type |
+| Now Playing, controls hidden | ◀ ▶ | Previous / next song |
+| Now Playing, controls hidden | OK, ▲ or ▼ | Shows the controls |
+| Now Playing, on the progress bar | ◀ ▶ | Scrub 10 s at a time |
+| Now Playing, on the progress bar | OK | Play / pause |
+| Now Playing, on the progress bar | ▼ | Up Next |
+| Back | — | Closes Up Next, then the controls, then Now Playing; pops a page; goes to the tab bar; then Home; twice on Home exits |
+| Media keys | ▶❚❚ ◀◀ ▶▶ ⏮ ⏭ | Work everywhere |
+
 ## What it does
 
 - **YouTube Music**: search for songs, albums, artists and playlists; browse the home feed; album, playlist and artist pages; radio.
@@ -21,6 +40,10 @@ Not affiliated with Google, YouTube, JioSaavn or Samsung. It streams from their 
   - Shuffle, repeat and like buttons.
   - The audio source and bitrate are shown.
 - **AutoPlay**: plays radio when the queue ends.
+- **Explore**: new albums and singles, trending, and every YouTube Music mood and genre.
+- **Library**: favourite songs, saved albums and playlists, recently played.
+- **Search** with an on-screen keyboard, suggestions and recent searches.
+- **Themes**: Dynamic Artwork, Pure Black (OLED) and Midnight, from BitChord TV.
 - **Sleep timer**.
 - **Settings > Diagnostics** shows the device info and an error log.
 
@@ -95,7 +118,9 @@ All errors are also written to **Settings > Diagnostics > Log**. Read that first
 | "Press Play to start" | The TV blocked autoplay before the first key press | Press Play. |
 | Artwork stays blank in places | Google's image servers rate-limit bursts (HTTP 429) | Images load a few at a time and retry once; scrolling back reloads them. |
 | "Timed out after 8s" | Slow network | Try again. The Retry button on the error screen reloads. |
-| No lyrics | LRCLIB has nothing for the song | Expected for many songs. |
+| No lyrics | LRCLIB has nothing for this exact recording. The app now refuses lyrics whose title, artist or length don't match, so it shows none rather than another song's | Expected for many songs. The Lyrics button stays dimmed. |
+| A press moves focus two steps | Only seen with the dev server's hot reload | Reload the page; the TV build is unaffected. |
+| Focus seems lost (nothing highlighted) | A page finished loading after you moved | Press any arrow: focus returns to the page, or press ▲ for the tab bar. |
 | Music stops when you press Home | Intentional: the app pauses when hidden so audio never plays over other apps | — |
 
 ## Licence

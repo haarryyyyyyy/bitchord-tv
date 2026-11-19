@@ -1,86 +1,151 @@
+// Now Playing, as BitChord TV has it (TvNowPlayingScreen.kt):
+// the artwork's colours fill the screen; the cover sits centred, and glides left when
+// lyrics arrive; the transport (title, buttons, scrubber) rises on any press and steps
+// away after 5 idle seconds. With it away, Left/Right change track and OK brings it back.
+// On the scrubber, Left/Right scrub and OK plays or pauses; Down opens Up Next.
+// Back closes Up Next, then the transport, then the player.
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { drawMesh } from '../lib/artcolor'
 import { fetchLyrics, lineAt, type Lyrics } from '../lyrics'
-import { openNowPlaying } from '../nav'
-import { cycleRepeat, jumpTo, next, player, position, prev, toggle, toggleShuffle } from '../player'
+import { openMenu, openNowPlaying } from '../nav'
+import { jumpTo, next, player, position, prev, seekTo, toggle } from '../player'
 import type { Stream, Track } from '../sources/types'
 import { isLiked, liked, settings, toggleLike, useStore } from '../store'
 import { Icon, PauseGlyph, PlayGlyph } from './icons'
-import { LazyImg } from './lazyimg'
-import { Ambient, Explicit, fmt, img, NowBars, useAsync } from './parts'
+import { Art, Bars, Explicit, fmt, img } from './kit'
 
-const sourceLabel = (s: Stream | null) => (s ? `${s.from === 'saavn' ? 'JioSaavn' : 'YouTube Music'} · ${s.codec}${s.kbps ? ' ' + s.kbps + ' kbps' : ''}` : '')
+const IDLE_MS = 5000
+const SCRUB_STEP = 10
+const SCRUB_COMMIT_MS = 700
 
-function Progress() {
-  const p = useStore(position)
-  const ratio = p.duration ? Math.min(1, p.time / p.duration) : 0
+/** The handler App gives first refusal on every key while Now Playing is open. */
+export let nowPlayingKeys: ((e: KeyboardEvent) => boolean) | null = null
+
+const quality = (s: Stream | null) => (s ? [s.from === 'saavn' ? 'JioSaavn' : 'YouTube Music', s.codec + (s.kbps ? ` ${s.kbps} kbps` : '')] : null)
+
+function Mesh({ src }: { src: string }) {
+  const a = useRef<HTMLCanvasElement>(null)
+  const b = useRef<HTMLCanvasElement>(null)
+  const [top, setTop] = useState<'a' | 'b'>('a')
+  useEffect(() => {
+    const target = top === 'a' ? b.current : a.current
+    if (!target || !src) return
+    let live = true
+    drawMesh(target, img(src, 120)).then(
+      () => live && setTop(top === 'a' ? 'b' : 'a'),
+      () => {},
+    )
+    return () => {
+      live = false
+    }
+  }, [src])
   return (
-    <div class="progress">
-      <button data-f data-key="np-seek" data-seek class="bar" aria-label="Seek. Left and right move 10 seconds">
-        <span class="bar-fill" style={{ transform: `scaleX(${ratio})` }} />
-        <span class="bar-knob" style={{ transform: `translateX(${ratio * 100}%)` }}>
-          <i />
-        </span>
+    <div class="mesh" aria-hidden="true">
+      <canvas ref={a} width="8" height="6" class={top === 'a' ? 'on' : ''} />
+      <canvas ref={b} width="8" height="6" class={top === 'b' ? 'on' : ''} />
+    </div>
+  )
+}
+
+function Scrubber({ target }: { target: number | null }) {
+  const fill = useRef<HTMLSpanElement>(null)
+  const knob = useRef<HTMLSpanElement>(null)
+  const now = useRef<HTMLSpanElement>(null)
+  const left = useRef<HTMLSpanElement>(null)
+  // Written straight to the DOM: four ticks a second re-render nothing.
+  useEffect(() => {
+    const paint = (p: { time: number; duration: number }) => {
+      const t = target != null ? target : p.time
+      const r = p.duration ? Math.min(1, t / p.duration) : 0
+      if (fill.current) fill.current.style.transform = `scaleX(${r})`
+      if (knob.current) knob.current.style.transform = `translateX(${r * 1748}px)`
+      if (now.current) now.current.textContent = fmt(t) || '0:00'
+      if (left.current) left.current.textContent = p.duration ? '−' + (fmt(Math.max(0, p.duration - t)) || '0:00') : ''
+    }
+    paint(position.get())
+    return position.subscribe(paint)
+  }, [target])
+  return (
+    <div class="scrub">
+      <button data-f data-key="np-scrub" data-autofocus class={'scrub-bar' + (target != null ? ' scrubbing' : '')} aria-label="Playback position. Left and right move 10 seconds, OK plays or pauses, Down shows Up Next.">
+        <span class="scrub-fill" ref={fill} />
+        <span class="scrub-knob" ref={knob} />
       </button>
-      <div class="times">
-        <span>{fmt(p.time) || '0:00'}</span>
-        <span>{p.duration ? '-' + fmt(Math.max(0, p.duration - p.time)) : ''}</span>
+      <div class="scrub-times">
+        <span ref={now} />
+        <span ref={left} />
       </div>
     </div>
   )
 }
 
-function LyricsPanel({ t }: { t: Track }) {
-  const l = useAsync<Lyrics | null>(() => fetchLyrics(t), [t.id])
-  const p = useStore(position)
-  const box = useRef<HTMLDivElement>(null)
+function LyricsView({ lyrics }: { lyrics: Lyrics }) {
   const list = useRef<HTMLDivElement>(null)
-  const [offset, setOffset] = useState(0)
-  const lyr = l.data
-  const idx = lyr && lyr.synced ? lineAt(lyr.lines, p.time + 0.25) : -1
-
+  const [idx, setIdx] = useState(-1)
   useEffect(() => {
-    if (!lyr || !box.current || !list.current) return
-    const viewH = box.current.clientHeight
-    if (lyr.synced) {
-      const el = list.current.children[Math.max(0, idx)] as HTMLElement | undefined
-      if (el) setOffset(Math.max(0, el.offsetTop - viewH * 0.32))
-    } else {
-      // Unsynced lyrics drift with the song so the words are roughly in view.
-      const over = list.current.scrollHeight - viewH
-      setOffset(over > 0 && p.duration ? (over * p.time) / p.duration : 0)
+    if (!lyrics.synced) return
+    const on = (p: { time: number }) => {
+      const i = lineAt(lyrics.lines, p.time + 0.3)
+      setIdx((prevIdx) => (prevIdx === i ? prevIdx : i))
     }
-  }, [idx, lyr, lyr && !lyr.synced ? Math.floor(p.time / 2) : 0])
-
-  if (l.loading) return <p class="panel-note">Finding lyrics…</p>
-  if (!lyr) return <p class="panel-note">No lyrics for this song.</p>
+    on(position.get())
+    return position.subscribe(on)
+  }, [lyrics])
+  useEffect(() => {
+    const box = list.current
+    if (!box) return
+    if (lyrics.synced) {
+      const el = box.children[Math.max(0, idx)] as HTMLElement | undefined
+      if (el) box.style.transform = `translateY(${-(el.offsetTop - 300)}px)`
+    }
+  }, [idx, lyrics])
+  // Unsynced lyrics drift with the song so the words are roughly in view.
+  useEffect(() => {
+    if (lyrics.synced) return
+    return position.subscribe((p) => {
+      const box = list.current
+      if (!box || !p.duration) return
+      const over = Math.max(0, box.scrollHeight - 700)
+      box.style.transform = `translateY(${-(over * p.time) / p.duration}px)`
+    })
+  }, [lyrics])
   return (
-    <div class={'lyrics' + (lyr.synced ? ' synced' : ' plain')} ref={box}>
-      <div class="lyrics-list" ref={list} style={{ transform: `translateY(${-offset}px)` }}>
-        {lyr.lines.map((line, i) => (
-          <p class={i === idx ? 'on' : i < idx ? 'past' : ''}>{line.text || '♪'}</p>
+    <div class={'lyrics' + (lyrics.synced ? '' : ' plain')}>
+      <div class="lyrics-list" ref={list}>
+        {lyrics.lines.map((l, i) => (
+          <p class={i === idx ? 'on' : i < idx ? 'past' : ''}>{l.text || '♪'}</p>
         ))}
       </div>
     </div>
   )
 }
 
-function QueuePanel() {
+function UpNext() {
   const s = useStore(player)
-  const upcoming = s.queue.slice(s.index + 1, s.index + 31)
-  if (!upcoming.length) return <p class="panel-note">{settings.get().autoplay ? 'AutoPlay will add similar songs when this one ends.' : 'Nothing queued.'}</p>
+  const items = s.queue.slice(s.index + 1, s.index + 21)
+  if (!items.length) return <p class="upnext-empty">{settings.get().autoplay ? 'AutoPlay adds similar songs when this one ends.' : 'Nothing is queued after this song.'}</p>
   return (
-    <div class="queue" data-scroll>
-      {upcoming.map((t, i) => (
-        <button data-f data-key={'q' + t.id} class="trow" onClick={() => jumpTo(s.index + 1 + i)}>
-          <LazyImg class="trow-art" src={img(t.image, 120)} size={64} />
-          <span class="trow-text">
-            <b>{t.title}</b>
-            <i>{t.artist}</i>
-          </span>
-          <span class="trow-time">{fmt(t.durationSec)}</span>
-        </button>
-      ))}
+    <div class="row upnext">
+      <div class="row-track" data-row>
+        {items.map((t, i) => (
+          <button data-f data-key={'up:' + t.id} class="lockup" style={{ width: 200 }} onClick={() => jumpTo(s.index + 1 + i)} aria-label={`${t.title}, ${t.artist}`}>
+            <Art src={t.image} size={200} />
+            <span class="cap">
+              <b>{t.title}</b>
+              <i>{t.artist}</i>
+            </span>
+          </button>
+        ))}
+      </div>
     </div>
+  )
+}
+
+function TransportButton({ k, icon, label, onClick, active, disabled }: { k: string; icon: string; label: string; onClick: () => void; active?: boolean; disabled?: boolean }) {
+  return (
+    <button data-f={disabled ? undefined : ''} data-key={k} class={'tbtn' + (active ? ' active' : '') + (disabled ? ' off' : '')} aria-label={label} aria-pressed={active} onClick={disabled ? undefined : onClick}>
+      <Icon name={icon} size={36} fill={icon === 'star' && active} stroke={2.2} />
+    </button>
   )
 }
 
@@ -88,85 +153,168 @@ export function NowPlaying() {
   const s = useStore(player)
   const set = useStore(settings)
   useStore(liked)
-  const t = s.queue[s.index]
-  const [panel, setPanel] = useState<'lyrics' | 'queue'>(set.showLyrics ? 'lyrics' : 'queue')
-  if (!t) return null
-  const heart = isLiked(t.id)
-  return (
-    <div class="np" data-layer role="dialog" aria-label="Now Playing">
-      <Ambient image={t.image} />
-      <div class="np-player">
-        <div class={'np-art' + (s.playing ? ' playing' : '')}>
-          <img src={img(t.image, 800)} width="460" height="460" alt="" />
+  const t: Track | undefined = s.queue[s.index]
+  const [controls, setControls] = useState(true)
+  const [upNext, setUpNext] = useState(false)
+  const [lyricsOff, setLyricsOff] = useState(!set.showLyrics)
+  const [lyrics, setLyrics] = useState<Lyrics | null>(null)
+  const [scrubTarget, setScrubTarget] = useState<number | null>(null)
+  const [flash, setFlash] = useState<{ glyph: string; n: number } | null>(null)
+  const [input, setInput] = useState(0)
+  const scrubTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const root = useRef<HTMLDivElement>(null)
+
+  // Lyrics wait for a known length, so the match can check it.
+  const dur = Math.round(position.get().duration || (t ? t.durationSec : 0))
+  useEffect(() => {
+    setLyrics(null)
+    if (!t) return
+    let live = true
+    const go = (d: number) => fetchLyrics(t, d).then((l) => live && setLyrics(l), () => {})
+    if (dur) go(dur)
+    else {
+      const off = position.subscribe((p) => {
+        if (p.duration) off(), go(p.duration)
+      })
+      return () => ((live = false), off())
+    }
+    return () => {
+      live = false
+    }
+  }, [t && t.id])
+
+  useEffect(() => {
+    if (!controls || upNext || !s.playing || scrubTarget != null) return
+    const timer = setTimeout(() => setControls(false), IDLE_MS)
+    return () => clearTimeout(timer)
+  }, [controls, upNext, s.playing, scrubTarget, input])
+
+  // Focus follows what's on screen: the scrubber when the transport rises, the stage when it goes.
+  useEffect(() => {
+    const el = root.current && root.current.querySelector<HTMLElement>(controls ? '[data-key=np-scrub]' : '[data-key=np-stage]')
+    if (el) el.focus()
+  }, [controls])
+  useEffect(() => {
+    if (!upNext || !root.current) return
+    const first = root.current.querySelector<HTMLElement>('.upnext [data-f]')
+    if (first) first.focus()
+  }, [upNext])
+
+  const showFlash = (glyph: string) => setFlash({ glyph, n: Date.now() })
+  const commit = (to: number | null) => {
+    if (scrubTimer.current) clearTimeout(scrubTimer.current)
+    if (to != null) seekTo(to)
+    setScrubTarget(null)
+  }
+  const scrub = (delta: number) => {
+    const p = position.get()
+    const from = scrubTarget != null ? scrubTarget : p.time
+    const to = Math.max(0, Math.min(Math.max(0, p.duration - 1), from + delta))
+    setScrubTarget(to)
+    if (scrubTimer.current) clearTimeout(scrubTimer.current)
+    scrubTimer.current = setTimeout(() => commit(to), SCRUB_COMMIT_MS)
+  }
+
+  nowPlayingKeys = (e: KeyboardEvent) => {
+    const k = e.keyCode
+    setInput((n) => n + 1)
+    const isBack = k === 10009 || k === 27 || k === 8
+    if (isBack) {
+      if (upNext) setUpNext(false)
+      else if (controls) setControls(false)
+      else openNowPlaying(false)
+      return true
+    }
+    if (!controls) {
+      if (k === 37) return prev(), showFlash('prev'), true
+      if (k === 39) return next(), showFlash('next'), true
+      if (k === 13 || k === 38 || k === 40) return setControls(true), true
+      return false
+    }
+    const active = document.activeElement as HTMLElement | null
+    if (active && active.dataset.key === 'np-scrub') {
+      if (k === 37 || k === 39) return scrub(k === 39 ? SCRUB_STEP : -SCRUB_STEP), true
+      if (k === 13) {
+        if (!e.repeat) scrubTarget != null ? commit(scrubTarget) : toggle()
+        return true
+      }
+      if (k === 40) return setUpNext(true), true
+    }
+    if (upNext && k === 38 && active && active.closest('.upnext')) {
+      setUpNext(false)
+      const bar = root.current && root.current.querySelector<HTMLElement>('[data-key=np-scrub]')
+      if (bar) bar.focus()
+      return true
+    }
+    return false
+  }
+  useEffect(() => () => void (nowPlayingKeys = null), [])
+
+  if (!t)
+    return (
+      <div class="np empty" data-layer role="dialog" aria-label="Now Playing">
+        <div class="np-nothing">
+          <Icon name="music" size={96} stroke={1.5} />
+          <h2>Nothing Playing</h2>
+          <p>Choose a song from Home, Explore or Search.</p>
+          <button data-f data-autofocus data-key="np-browse" class="btn primary" onClick={() => openNowPlaying(false)}>
+            <span>Browse Music</span>
+          </button>
         </div>
-        <div class="np-title">
-          <div>
+      </div>
+    )
+
+  const showLyrics = !!lyrics && lyrics.lines.length > 0 && !lyricsOff
+  const q = quality(s.stream)
+  const fav = isLiked(t.id)
+  return (
+    <div ref={root} class={'np' + (showLyrics ? ' with-lyrics' : '') + (controls ? ' controls' : '') + (upNext ? ' upnext-open' : '')} data-layer role="dialog" aria-label="Now Playing">
+      <Mesh src={t.image} />
+      <div class="np-scrim" />
+      <button data-f data-key="np-stage" class="np-stage" aria-label="Show controls" onClick={() => setControls(true)} />
+      <div class="np-cover">
+        <img src={img(t.image, 720)} width="640" height="640" alt="" />
+      </div>
+      <div class="np-caption" aria-hidden={controls}>
+        <b>{t.title}</b>
+        <i>{t.artist}</i>
+      </div>
+      {showLyrics ? <LyricsView lyrics={lyrics!} /> : null}
+      <section class="transport" aria-hidden={!controls}>
+        <div class="transport-top">
+          <div class="transport-id">
             <h1>
               {t.title}
               {t.explicit ? <Explicit /> : null}
             </h1>
-            <p>{t.artist}</p>
+            <p>{[t.artist, t.album].filter(Boolean).join(' — ')}</p>
+            <div class="quality">
+              {s.loading ? <Bars on /> : null}
+              {s.error ? <span class="err">{s.error}</span> : q ? (
+                <>
+                  <span class="chip">{q[0]}</span>
+                  <span>{q[1]}</span>
+                </>
+              ) : (
+                <span>Loading…</span>
+              )}
+            </div>
           </div>
-          <button data-f data-key="np-like" class={'iconbtn' + (heart ? ' on' : '')} aria-label={heart ? 'Unlike' : 'Like'} onClick={() => toggleLike(t)}>
-            <Icon name="heart" size={34} fill={heart} />
-          </button>
+          <div class="tbtns">
+            <TransportButton k="np-fav" icon="star" label={fav ? 'Remove from Favourites' : 'Add to Favourites'} active={fav} onClick={() => toggleLike(t)} />
+            <TransportButton k="np-lyrics" icon="lyrics" label={showLyrics ? 'Hide Lyrics' : 'Show Lyrics'} active={showLyrics} disabled={!lyrics} onClick={() => setLyricsOff(!lyricsOff)} />
+            <TransportButton k="np-queue" icon="queue" label="Up Next" active={upNext} onClick={() => setUpNext(!upNext)} />
+            <TransportButton k="np-more" icon="more" label="More" onClick={() => openMenu(t)} />
+          </div>
         </div>
-        <p class="np-source">
-          {s.loading ? <NowBars on /> : null}
-          {s.error ? <span class="err">{s.error}</span> : sourceLabel(s.stream) || 'Loading…'}
-        </p>
-        <Progress />
-        <div class="controls">
-          <button data-f data-key="np-shuffle" class={'iconbtn' + (s.shuffle ? ' on' : '')} aria-label="Shuffle" onClick={toggleShuffle}>
-            <Icon name="shuffle" size={34} />
-          </button>
-          <button data-f data-key="np-prev" class="iconbtn big" aria-label="Previous" onClick={prev}>
-            <Icon name="prev" size={44} fill />
-          </button>
-          <button data-f data-autofocus data-key="np-play" class="playbtn" aria-label={s.playing ? 'Pause' : 'Play'} onClick={toggle}>
-            {s.playing ? <PauseGlyph size={48} /> : <PlayGlyph size={48} />}
-          </button>
-          <button data-f data-key="np-next" class="iconbtn big" aria-label="Next" onClick={() => next()}>
-            <Icon name="next" size={44} fill />
-          </button>
-          <button data-f data-key="np-repeat" class={'iconbtn' + (s.repeat !== 'off' ? ' on' : '')} aria-label={'Repeat ' + s.repeat} onClick={cycleRepeat}>
-            <Icon name="repeat" size={34} />
-            {s.repeat === 'one' ? <sup>1</sup> : null}
-          </button>
-        </div>
-      </div>
-      <section class="np-panel">
-        <div class="tabs">
-          <button data-f data-key="np-tab-lyrics" class={'tab' + (panel === 'lyrics' ? ' on' : '')} onClick={() => setPanel('lyrics')} onFocus={() => setPanel('lyrics')}>
-            Lyrics
-          </button>
-          <button data-f data-key="np-tab-queue" class={'tab' + (panel === 'queue' ? ' on' : '')} onClick={() => setPanel('queue')} onFocus={() => setPanel('queue')}>
-            Up Next
-          </button>
-          <button data-f data-key="np-close" class="tab ghost" onClick={() => openNowPlaying(false)}>
-            <Icon name="back" size={26} /> Back
-          </button>
-        </div>
-        {panel === 'lyrics' ? <LyricsPanel t={t} /> : <QueuePanel />}
+        <Scrubber target={scrubTarget} />
+        {upNext ? <UpNext /> : null}
       </section>
+      {flash ? (
+        <div key={flash.n} class="flash" aria-hidden="true">
+          {flash.glyph === 'play' ? <PlayGlyph size={80} /> : flash.glyph === 'pause' ? <PauseGlyph size={80} /> : <Icon name={flash.glyph} size={80} fill />}
+        </div>
+      ) : null}
     </div>
-  )
-}
-
-export function NowPill() {
-  const s = useStore(player)
-  const p = useStore(position)
-  const t = s.queue[s.index]
-  if (!t) return null
-  return (
-    <button data-f data-key="now-pill" class="pill-player" onClick={() => openNowPlaying(true)} aria-label={`Now Playing: ${t.title}. Press OK to open.`}>
-      <img src={img(t.image, 120)} width="64" height="64" alt="" />
-      <span class="pp-text">
-        <b>{t.title}</b>
-        <i>{t.artist}</i>
-      </span>
-      <span class="pp-state">{s.loading ? <NowBars on /> : s.playing ? <PauseGlyph size={30} /> : <PlayGlyph size={30} />}</span>
-      <span class="pp-line" style={{ transform: `scaleX(${p.duration ? Math.min(1, p.time / p.duration) : 0})` }} />
-    </button>
   )
 }
